@@ -1,0 +1,15 @@
+# Python / Backend Virtual Environments & Cache
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# React / Frontend Build & Dependencies
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# OS & Environment Variables
+.DS_Store
+.env

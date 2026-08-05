@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+transformers>=5.2.0
+torch>=2.5.0
+peft
+accelerate
+hf-xet
