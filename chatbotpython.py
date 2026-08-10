@@ -17,6 +17,7 @@
 import os
 import glob
 import random
+import sys
 
 import numpy as np
 import torch
@@ -38,14 +39,11 @@ np.random.seed(SEED)
 
 def main():
     # =========================================================
-    # 1) Download the FULL dataset via KaggleHub (no hard-coded path)
+    # 1) Download the FULL dataset via KaggleHub
     # =========================================================
     path = kagglehub.dataset_download("ujjwalaggarwal402/video-games-dataset")
     print("Path to dataset files:", path)
 
-    # Auto-discover the CSV inside the downloaded folder instead of assuming a filename.
-    # We pick the largest CSV, since a dataset folder can sometimes contain small
-    # auxiliary files alongside the main data file.
     csv_candidates = glob.glob(os.path.join(path, "**", "*.csv"), recursive=True)
     if not csv_candidates:
         raise FileNotFoundError(f"No CSV file found under {path}")
@@ -53,12 +51,9 @@ def main():
     print("Using CSV file:", csv_path)
 
     df = pd.read_csv(csv_path)
-    print("Columns found:", list(df.columns))
-    print("Rows found:", len(df))
 
     # =========================================================
-    # 2) Robustly map dataset columns (case-insensitive, several accepted
-    #    names per field) instead of hard-coding exact column names.
+    # 2) Robustly map dataset columns
     # =========================================================
     def find_col(candidates):
         lower_map = {c.lower().strip(): c for c in df.columns}
@@ -76,193 +71,198 @@ def main():
     developer_col = find_col(["developer", "developers", "dev"])
 
     if game_col is None:
-        raise ValueError(
-            "Could not find a game-title column. "
-            f"Columns available: {list(df.columns)}"
-        )
+        raise ValueError("Could not find a game-title column.")
 
-    print("Required  -> game_col:", game_col, "| release_col:", release_col, "| rating_col:", rating_col)
-    print("Optional  -> genre:", genre_col, "platform:", platform_col,
-        "publisher:", publisher_col, "developer:", developer_col)
-
-    # =========================================================
-    # 3) Keep the FULL dataset. We only drop rows with a missing game name,
-    #    since every training example needs a title. We do NOT cap the
-    #    dataset or drop rows just because one optional field is empty —
-    #    each row simply contributes fewer QA pairs if some fields are missing.
-    # =========================================================
     df = df.dropna(subset=[game_col]).reset_index(drop=True)
     print(f"Usable rows (full dataset, no 10K cap): {len(df)}")
 
+    # Parse dates accurately to identify "original" vs "port" releases
+    if release_col:
+        df['parsed_date'] = pd.to_datetime(df[release_col], errors='coerce', dayfirst=True)
+    else:
+        df['parsed_date'] = pd.NaT
 
     # =========================================================
-    # 4) Build NATURAL, VARIED conversational training pairs
-    #    (no rigid "Question: / Answer:" template — many phrasings per fact,
-    #    and facts only come from the dataset itself).
+    # 3) LINGUISTIC POOLS (Intent over rigid templates)
     # =========================================================
-    def clean(v):
-        if pd.isna(v):
-            return None
-        s = str(v).strip()
-        return s if s and s.lower() != "nan" else None
-
-    release_q = [
+    global_release_q = [
         "When did {g} come out?", "What year was {g} released?",
         "Do you know the release date of {g}?", "When was {g} released?",
-        "Can you tell me when {g} launched?",
+        "Can you tell me when {g} launched?", "When did {g} drop?",
+        "What was the original release date for {g}?",
+        "When did the first {g} game come out?", "Tell me when {g} was first available.",
     ]
-    release_a = [
-        "{g} was released on {v}.", "{g} came out on {v}.", "{g} launched on {v}.",
+    global_release_a = [
+        "The original release of {g} was on {date} for {consoles}.",
+        "{g} first launched on {date} (available on {consoles}).",
+        "It originally came out on {date} for {consoles}.",
+        "According to the database, {g} was first released on {date} on {consoles}.",
+    ]
+    
+    plat_release_q = [
+        "When did {g} come out on {c}?", "When was {g} released for {c}?",
+        "What was the {c} release date for {g}?", "When did the {c} version of {g} launch?",
+        "Do you know when the {c} version of {g} came out?", "When was the {c} port of {g} released?",
+        "When did {g} drop on {c}?", "What date did {g} launch for {c}?",
+        "When did the {c} version drop?", "{g} {c} release date?",
+    ]
+    plat_release_a = [
+        "The {c} version of {g} was released on {date}.",
+        "For {c}, {g} launched on {date}.",
+        "It came out on {c} on {date}.",
+        "According to the database, the {c} release of {g} was {date}.",
+        "{g} dropped on {c} on {date}.",
+    ]
+    
+    plat_score_q = [
+        "What is the critic score for {g} on {c}?", "How did {g} rate on {c}?",
+        "What score did {g} get on {c}?", "Is the {c} version of {g} rated well?",
+        "Critic rating for {g} {c}?",
+    ]
+    plat_score_a = [
+        "{g} has a critic score of {score} on {c}.",
+        "On {c}, {g} received a critic score of {score}.",
+        "Critics gave the {c} version of {g} a score of {score}.",
+    ]
+    
+    dev_q = ["Who developed {g}?", "What studio made {g}?", "Who created {g}?", "Which developer is behind {g}?"]
+    dev_a = ["{g} was developed by {dev}.", "The studio behind {g} is {dev}.", "{dev} created {g}."]
+    
+    pub_q = ["Who published {g}?", "What company published {g}?", "Who is the publisher of {g}?"]
+    pub_a = ["{g} was published by {pub}.", "The publisher for {g} is {pub}."]
+    
+    combo_q = [
+        "Who developed {g} and what genre is it?",
+        "Can you tell me the genre and developer of {g}?",
+        "What kind of game is {g} and who made it?",
+    ]
+    combo_a = [
+        "{g} is a {genre} game developed by {dev}.",
+        "It was developed by {dev} and belongs to the {genre} genre.",
+    ]
+    
+    about_q = ["Tell me about {g}.", "What do you know about {g}?", "Give me some info on {g}.", "What is {g}?"]
+    
+    follow_plat_q = [
+        "What about the {c} version?", "When did it come out on {c}?",
+        "Did it release on {c}?", "What was the {c} release date?",
+        "When did the {c} port drop?", "And on {c}?",
     ]
 
-    score_q = [
-        "What's the critic score for {g}?", "How was {g} rated by critics?",
-        "What rating did {g} get?", "Do you know how well {g} scored with critics?",
-        "What's the critic rating of {g}?",
-    ]
-    score_a = [
-        "{g} has a critic score of {v}.", "{g} was rated {v} by critics.",
-        "Critics gave {g} a score of {v}.",
-    ]
-
-    genre_q = [
-        "What genre is {g}?", "What kind of game is {g}?", "Which genre does {g} belong to?",
-    ]
-    genre_a = [
-        "{g} is a {v} game.", "{g} falls under the {v} genre.",
-    ]
-
-    platform_q = [
-        "What platform can I play {g} on?", "Which platform is {g} available on?",
-        "What console is {g} on?",
-    ]
-    platform_a = [
-        "{g} is available on {v}.", "You can play {g} on {v}.",
-    ]
-
-    publisher_q = ["Who published {g}?", "What company published {g}?"]
-    publisher_a = ["{g} was published by {v}."]
-
-    developer_q = ["Who developed {g}?", "What studio made {g}?"]
-    developer_a = ["{g} was developed by {v}."]
-
-    about_q = [
-        "Tell me about {g}.", "What do you know about {g}?",
-        "Give me some info on {g}.", "Do you know anything about this game: {g}?",
-    ]
-
-    examples = []
-
-    def add_pair(q_pool, a_pool, game, value):
-        q = random.choice(q_pool).format(g=game)
-        a = random.choice(a_pool).format(g=game, v=value)
-        examples.append((q, a))
-
-    for row in df.itertuples(index=False):
-        game = clean(getattr(row, game_col))
-        if not game:
+    # =========================================================
+    # 4) BUILD RELATIONAL QA PAIRS
+    # =========================================================
+    examples_single = []
+    examples_multi = []
+    validation_pool = []
+    
+    grouped = df.groupby(game_col)
+    
+    for game, group in grouped:
+        game_str = str(game).strip()
+        if not game_str or game_str.lower() == 'nan':
             continue
+            
+        group = group.sort_values('parsed_date')
+        
+        # Aggregate global facts across all platforms for this specific game
+        devs = group[developer_col].dropna().unique() if developer_col else []
+        dev = devs[0] if len(devs) > 0 else None
+        
+        pubs = group[publisher_col].dropna().unique() if publisher_col else []
+        pub = pubs[0] if len(pubs) > 0 else None
+        
+        genres = group[genre_col].dropna().unique() if genre_col else []
+        genre = genres[0] if len(genres) > 0 else None
+        
+        all_consoles = [str(c) for c in group[platform_col].dropna().unique() if str(c).lower() != 'all']
+        all_consoles_str = ", ".join(all_consoles)
+        
+        # Identify the original/first release for generic queries
+        valid_dates = group.dropna(subset=['parsed_date'])
+        if not valid_dates.empty:
+            first_row = valid_dates.iloc[0]
+            first_date_str = first_row[release_col]
+            first_parsed = first_row['parsed_date']
+            first_consoles = valid_dates[valid_dates['parsed_date'] == first_parsed][platform_col].unique()
+            first_consoles = [str(c) for c in first_consoles if str(c).lower() != 'all']
+            first_consoles_str = ", ".join(first_consoles) if first_consoles else "various platforms"
+        else:
+            first_date_str = None
+            first_consoles_str = None
+            
+        # -- GLOBAL QUESTIONS (No platform specified) --
+        if first_date_str:
+            q = random.choice(global_release_q).format(g=game_str)
+            a = random.choice(global_release_a).format(g=game_str, date=first_date_str, consoles=first_consoles_str)
+            examples_single.append((q, a))
+            
+        if dev:
+            examples_single.append((random.choice(dev_q).format(g=game_str), random.choice(dev_a).format(g=game_str, dev=dev)))
+        else:
+            examples_single.append((random.choice(dev_q).format(g=game_str), f"I don't have the developer information for {game_str} in my database."))
+            
+        if pub:
+            examples_single.append((random.choice(pub_q).format(g=game_str), random.choice(pub_a).format(g=game_str, pub=pub)))
+            
+        if dev and genre:
+            examples_single.append((random.choice(combo_q).format(g=game_str), random.choice(combo_a).format(g=game_str, genre=genre, dev=dev)))
 
-        date      = clean(getattr(row, release_col)) if release_col else None
-        score     = clean(getattr(row, rating_col)) if rating_col else None
-        genre     = clean(getattr(row, genre_col)) if genre_col else None
-        platform  = clean(getattr(row, platform_col)) if platform_col else None
-        publisher = clean(getattr(row, publisher_col)) if publisher_col else None
-        developer = clean(getattr(row, developer_col)) if developer_col else None
-
-        if date:
-            add_pair(release_q, release_a, game, date)
-        if score:
-            add_pair(score_q, score_a, game, score)
-        if genre:
-            add_pair(genre_q, genre_a, game, genre)
-        if platform:
-            add_pair(platform_q, platform_a, game, platform)
-        if publisher and random.random() < 0.5:
-            add_pair(publisher_q, publisher_a, game, publisher)
-        if developer and random.random() < 0.5:
-            add_pair(developer_q, developer_a, game, developer)
-
-        # A natural "tell me about it" summary built from whichever facts exist
-        facts = []
-        if genre:
-            facts.append(f"a {genre} game")
-        if platform:
-            facts.append(f"available on {platform}")
-        if date:
-            facts.append(f"released on {date}")
-        if score:
-            facts.append(f"holding a critic score of {score}")
-        if developer:
-            facts.append(f"developed by {developer}")
-        if publisher:
-            facts.append(f"published by {publisher}")
-
-        if facts:
-            if len(facts) > 1:
-                summary = f"{game} is " + ", ".join(facts[:-1]) + " and " + facts[-1] + "."
+        # -- PLATFORM-SPECIFIC QUESTIONS --
+        for _, row in group.iterrows():
+            console = str(row[platform_col]) if platform_col and pd.notna(row[platform_col]) else ""
+            if not console or console.lower() == 'all':
+                continue
+                
+            date = str(row[release_col]) if release_col and pd.notna(row[release_col]) else None
+            score = str(row[rating_col]) if rating_col and pd.notna(row[rating_col]) else None
+            
+            if date:
+                q = random.choice(plat_release_q).format(g=game_str, c=console)
+                a = random.choice(plat_release_a).format(g=game_str, c=console, date=date)
+                examples_single.append((q, a))
+                
+                # Send 5% of platform queries to the validation pool
+                if random.random() < 0.05:
+                    validation_pool.append({
+                        "q": q, "a": a, "expected_date": date, "game": game_str, "console": console
+                    })
+                    
+            if score:
+                q = random.choice(plat_score_q).format(g=game_str, c=console)
+                a = random.choice(plat_score_a).format(g=game_str, c=console, score=score)
+                examples_single.append((q, a))
             else:
-                summary = f"{game} is " + facts[0] + "."
-            q = random.choice(about_q).format(g=game)
-            examples.append((q, summary))
+                examples_single.append((random.choice(plat_score_q).format(g=game_str, c=console), f"I don't have a critic score recorded for {game_str} on {console}."))
 
-    print(f"Generated {len(examples)} in-domain QA pairs from {len(df)} games.")
+        # -- MISSING DATA / NEGATIVE SAMPLES --
+        fake_consoles = ["Nintendo Switch", "PlayStation 5", "Xbox Series X", "PC", "Mobile", "Atari", "GameCube"]
+        if all_consoles:
+            missing_console = random.choice(fake_consoles)
+            if missing_console.lower() not in [c.lower() for c in all_consoles]:
+                q = random.choice(plat_release_q).format(g=game_str, c=missing_console)
+                a = f"I don't have any record of {game_str} releasing on {missing_console} in the database."
+                examples_single.append((q, a))
 
-    # =========================================================
-    # 5) Teach the model to stay in scope: a modest number of
-    #    off-topic and unknown-game refusal examples, built only from
-    #    generic phrasing (not fabricated game facts).
-    # =========================================================
-    off_topic_questions = [
-        "What's the weather like today?", "Can you help me with my math homework?",
-        "What's your favorite movie?", "Tell me a joke about cats.",
-        "How do I bake a chocolate cake?", "What's the capital of France?",
-        "Can you write me a poem about the ocean?", "What's the meaning of life?",
-        "How do I fix my car engine?", "What's in the news today?",
-    ]
-    refusal_answers = [
-        "I'm focused on video game info from my dataset, so I can't really help with that.",
-        "That's outside what I know — I'm built specifically to answer questions about video games.",
-        "I don't have information on that topic; I only know about the games in my dataset.",
-        "Sorry, that's not something I can help with — my knowledge is limited to video games.",
-    ]
-    n_refusals = max(200, len(examples) // 200)
-    for _ in range(n_refusals):
-        q = random.choice(off_topic_questions)
-        a = random.choice(refusal_answers)
-        examples.append((q, a))
-
-    fake_word_bank = [
-        "Shadow", "Crystal", "Eternal", "Rogue", "Iron", "Silent", "Frozen", "Neon",
-        "Lost", "Broken", "Realm", "Legends", "Odyssey", "Nexus", "Horizon",
-        "Chronicles", "Empire", "Void", "Rising", "Storm",
-    ]
-    unknown_q = [
-        "Do you know anything about {g}?", "What can you tell me about {g}?",
-        "Have you heard of {g}?",
-    ]
-    unknown_a = [
-        "I don't have any information about {g} in my dataset.",
-        "{g} isn't in my dataset, so I can't tell you anything about it.",
-        "I don't know anything about {g} — it's not part of the data I was trained on.",
-    ]
-    existing_titles = set(df[game_col].dropna().astype(str).str.lower())
-    n_unknown = max(200, len(examples) // 300)
-    made = 0
-    while made < n_unknown:
-        fake_game = f"{random.choice(fake_word_bank)} {random.choice(fake_word_bank)}"
-        if fake_game.lower() in existing_titles:
-            continue
-        q = random.choice(unknown_q).format(g=fake_game)
-        a = random.choice(unknown_a).format(g=fake_game)
-        examples.append((q, a))
-        made += 1
-
-    print(f"Added {n_refusals} off-topic + {n_unknown} unknown-game refusal examples.")
-    print(f"Total training examples: {len(examples)}")
+        # -- CONVERSATIONAL MULTI-TURN (Contextual Pronouns) --
+        if first_date_str and len(valid_dates) > 1:
+            later_rows = valid_dates[valid_dates['parsed_date'] > first_parsed]
+            if not later_rows.empty:
+                later_row = later_rows.sample(1).iloc[0]
+                later_console = str(later_row[platform_col])
+                later_date = str(later_row[release_col])
+                
+                if later_console.lower() != 'all':
+                    msg = [
+                        {"role": "user", "content": random.choice(about_q).format(g=game_str)},
+                        {"role": "assistant", "content": f"{game_str} is a {genre or 'video'} game. It originally launched on {first_date_str}."},
+                        {"role": "user", "content": random.choice(follow_plat_q).format(c=later_console)},
+                        {"role": "assistant", "content": random.choice(plat_release_a).format(g=game_str, c=later_console, date=later_date)}
+                    ]
+                    examples_multi.append(msg)
 
     # =========================================================
-    # 6) Assemble into chat-format conversations and split
+    # 5) ASSEMBLE MESSAGES & WORLD KNOWLEDGE REFUSALS
     # =========================================================
     SYSTEM_PROMPT = (
         "You are a friendly video game assistant. You answer questions using only "
@@ -270,44 +270,98 @@ def main():
         "data, say so honestly instead of guessing."
     )
 
-    random.shuffle(examples)
+    messages_list = []
+    
+    for q, a in examples_single:
+        messages_list.append([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": q},
+            {"role": "assistant", "content": a}
+        ])
+        
+    for multi in examples_multi:
+        messages_list.append([{"role": "system", "content": SYSTEM_PROMPT}] + multi)
 
-    data_rows = [
-        {
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": q},
-                {"role": "assistant", "content": a},
-            ]
-        }
-        for q, a in examples
+    # Include off-topic generic refusals to block general world-knowledge
+    off_topic_q = [
+        "What's the weather like?", "How do I bake a cake?", 
+        "Tell me a cat joke.", "Who is the current president of Egypt?",
+        "What is the capital of France?", "Who won the World Cup?",
+        "Explain quantum physics to me.", "How do I fix a car engine?",
+        "What is the meaning of life?", "Can you write a poem about the ocean?"
     ]
+    refusal_a = [
+        "I'm focused strictly on video game info from my dataset, so I can't help with that.",
+        "That is outside of my dataset. I only have information regarding video game releases, scores, and developers.",
+        "I don't have information on that topic; I only know about the games in my database."
+    ]
+    for _ in range(300):
+        messages_list.append([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": random.choice(off_topic_q)},
+            {"role": "assistant", "content": random.choice(refusal_a)}
+        ])
 
-    dataset = Dataset.from_list(data_rows)
+    print(f"\nGenerated {len(messages_list)} total conversations.")
+
+    # =========================================================
+    # 6) STRICT PRE-TRAINING VALIDATION AUDIT
+    # =========================================================
+    print("\n" + "="*60)
+    print("PRE-TRAINING VALIDATION & SAMPLE REVIEW")
+    print("="*60)
+    
+    passed = 0
+    failed = 0
+    
+    sample = random.sample(validation_pool, min(10, len(validation_pool)))
+    
+    for ex in sample:
+        print(f"User: {ex['q']}")
+        print(f"Assistant: {ex['a']}")
+        
+        expected_date = str(ex['expected_date'])
+        if expected_date in ex['a']:
+            print(f"Validation: [VALID] Correctly mapped platform date: {expected_date}\n")
+            passed += 1
+        else:
+            print(f"Validation: [INVALID] Expected to find date {expected_date} but didn't!\n")
+            failed += 1
+            
+    print(f"Validation Summary: {passed} Passed, {failed} Failed.")
+    
+    if failed > 0:
+        print("\nFATAL ERROR: Generated training data failed validation constraints.")
+        print("Data relationship structures are compromised. Training aborted.")
+        sys.exit(1)
+        
+    print("\nValidation successful! Here is a multi-turn conversation sample:")
+    if examples_multi:
+        sample_multi = random.choice(examples_multi)
+        for turn in sample_multi[1:]:
+            print(f"  {turn['role'].capitalize()}: {turn['content']}")
+            
+    print("="*60 + "\n")
+
+    # =========================================================
+    # 7) TOKENIZE AND TRAIN
+    # =========================================================
+    random.shuffle(messages_list)
+    dataset = Dataset.from_list([{"messages": msgs} for msgs in messages_list])
     split_dataset = dataset.train_test_split(test_size=0.02, seed=SEED)
     train_data = split_dataset["train"]
     val_data = split_dataset["test"]
 
-    print(f"Training samples: {len(train_data)}")
-    print(f"Validation samples: {len(val_data)}")
-
-
     model_id = "Qwen/Qwen3-1.7B"
 
-    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    # --- Precision fix: detect what the actual Colab GPU supports instead of ---
-    # --- blindly assuming BF16 (older GPUs like the T4 don't support it).    ---
     bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     compute_dtype = torch.bfloat16 if bf16_ok else torch.float16
-    print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
-    print(f"Using compute dtype: {compute_dtype} (bf16 supported: {bf16_ok})")
 
-    # Configure 4-bit Quantization (QLoRA)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -315,7 +369,6 @@ def main():
         bnb_4bit_compute_dtype=compute_dtype,
     )
 
-    # Load as a Causal Language Model for text-only chat
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         quantization_config=bnb_config,
@@ -325,8 +378,6 @@ def main():
     )
     model.config.use_cache = False
 
-    # Now that the tokenizer (and its chat template) is loaded, turn the
-    # "messages" conversations built earlier into the actual training text.
     def format_chat(example):
         text = tokenizer.apply_chat_template(
             example["messages"], tokenize=False, add_generation_prompt=False
@@ -336,18 +387,8 @@ def main():
     train_data = train_data.map(format_chat, remove_columns=["messages"])
     val_data = val_data.map(format_chat, remove_columns=["messages"])
 
-    print(train_data[0]["text"][:400])
-
-
-    # Prepare model for k-bit training
     model = prepare_model_for_kbit_training(model)
 
-    # Configure LoRA parameters.
-    # r=32 (alpha=64) targets ~35-40M trainable params on this ~1.7B model
-    # (roughly 2% of base params) — a clear step up from the previous ~10M
-    # without pushing into full-fine-tune territory or risking VRAM/overfitting
-    # problems on a single Colab T4 for a ~64K-row dataset. See the printed
-    # trainable-parameter count in the next cell.
     peft_config = LoraConfig(
         r=32,
         lora_alpha=64,
@@ -356,43 +397,30 @@ def main():
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
-
     model = get_peft_model(model, peft_config)
-
-
-    model.print_trainable_parameters()
-
-
-    from trl import SFTConfig, SFTTrainer
-
-    # 1. Enforce cache disabling (Crucial for gradient checkpointing)
-    model.config.use_cache = False
 
     training_args = SFTConfig(
         output_dir="./qwen-videogames-finetuned",
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        gradient_accumulation_steps=2,       # effective batch size 32
+        gradient_accumulation_steps=2,
         optim="paged_adamw_32bit",
         logging_steps=25,
         learning_rate=2e-4,
-        bf16=bf16_ok,                        # precision picked automatically above
+        bf16=bf16_ok,
         fp16=not bf16_ok,
         max_grad_norm=0.3,
-        num_train_epochs=1,                  # ~64K games x several QA pairs each is already
-                                            # a large number of steps for one epoch
+        num_train_epochs=1,
         eval_strategy="no",
         save_strategy="steps",
         save_steps=1000,
-        save_total_limit=2,                  # checkpoint periodically without filling the disk,
-                                            # protects a long Colab run against disconnects
+        save_total_limit=2,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
         report_to="none",
         dataset_text_field="text",
         max_length=384,
-        packing=True,                        # pack short QA examples together -> far less
-                                            # wasted padding compute over 64K rows
+        packing=True,
         dataloader_num_workers=0,
         dataset_num_proc=1,
         gradient_checkpointing=True,
@@ -407,13 +435,10 @@ def main():
         args=training_args,
     )
 
-    # Execute Fine-Tuning
     trainer.train()
 
-    # Save final artifacts
     trainer.save_model("qwen-videogames-final")
     tokenizer.save_pretrained("qwen-videogames-final")
-
     print("Video Game QA Fine-tuning complete!")
 
 if __name__ == "__main__":
