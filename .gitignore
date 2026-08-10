@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 env/
+qwen-videogames-finetuned/
 
 # React / Frontend Build & Dependencies
 frontend/node_modules/
