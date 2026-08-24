@@ -1,21 +1,16 @@
 import re
-from pathlib import Path
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
 
-# Must match the training script output directory:
-MODEL_DIR = Path(__file__).parent / "model"
 BASE_MODEL_NAME = "Qwen/Qwen3-1.7B"
 
 # Must remain EXACTLY the same as the training script
 SYSTEM_PROMPT = (
-    "You are a friendly video game assistant. You answer questions using only "
-    "the video game database you were trained on. If something isn't in your "
-    "data, say so honestly instead of guessing."
+    "You are a friendly and helpful video game assistant. Answer clearly, and "
+    "if you're uncertain about a fact, say so instead of guessing."
 )
 
 app = FastAPI(title="Video Games Q&A Chatbot API")
@@ -41,13 +36,8 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 @app.on_event("startup")
 def load_model():
     global tokenizer, model, eos_ids
-
-    if not MODEL_DIR.exists():
-        print(f"[WARNING] Model folder not found at {MODEL_DIR}. Copy 'qwen-videogames-final' contents to backend/model/.")
-        return
-
-    print(f"Loading tokenizer from {MODEL_DIR}...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+    print(f"Loading tokenizer from {BASE_MODEL_NAME}...")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -58,16 +48,15 @@ def load_model():
     else:
         dtype = torch.float32
 
-    print(f"Loading base Qwen model ({BASE_MODEL_NAME}) on {device} as {dtype}...")
-    base_model = AutoModelForCausalLM.from_pretrained(
+    print(f"Loading Qwen model ({BASE_MODEL_NAME}) on {device} as {dtype}...")
+    model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_NAME,
-        device_map=device,
-        dtype=dtype,
+        torch_dtype=dtype,
+        device_map="auto" if device == "cuda" else None,
+        trust_remote_code=True,
     )
-
-    print(f"Attaching and merging LoRA adapter from {MODEL_DIR}...")
-    peft_model = PeftModel.from_pretrained(base_model, MODEL_DIR)
-    model = peft_model.merge_and_unload()
+    if device == "cpu":
+        model = model.to(device)
     model.eval()
 
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -75,7 +64,7 @@ def load_model():
     if im_end_id is not None and im_end_id != tokenizer.unk_token_id:
         eos_ids.append(im_end_id)
 
-    print(f"Video Game Model successfully loaded and merged on {device}!")
+    print(f"Video Game Model successfully loaded on {device}!")
 
 class ChatRequest(BaseModel):
     question: str = Field(..., description="The user's question about a video game")
