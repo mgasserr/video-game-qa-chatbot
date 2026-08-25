@@ -1,101 +1,115 @@
-import { useState, useRef, useEffect } from 'react';
-import './App.css';
+import React, { useState, useRef, useEffect } from "react";
+import "./App.css";
 
 function App() {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [messages, setMessages] = useState([
+    {
+      role: "assistant",
+      content: "Hello! I am your local OSTEP (Operating Systems: Three Easy Pieces) Assistant. What operating systems concept can I help you with today?"
+    }
+  ]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef(null);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Automatically scroll to the newest message
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
-  const sendMessage = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || isLoading) return;
 
-    // Add user message to UI
-    const userMessage = { role: 'user', content: input };
-    setMessages((prev) => [...prev, userMessage]);
-    setInput('');
-    setLoading(true);
+    const userQuery = input.trim();
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: userQuery }]);
+    setIsLoading(true);
 
     try {
-      // Send to your Python Backend
-      const response = await fetch('http://localhost:8000/api/chat', {
-        method: 'POST',
+      const response = await fetch("http://localhost:8000/api/chat", {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
-        body: JSON.stringify({ question: userMessage.content }),
+        body: JSON.stringify({ question: userQuery }),
       });
 
       if (!response.ok) {
-        throw new Error('Backend failed to respond.');
+        throw new Error("Failed to fetch response");
       }
-      
-      const data = await response.json();
 
-      // Add AI response to UI
-      setMessages((prev) => [...prev, { role: 'assistant', content: data.answer }]);
+      const data = await response.json();
+      setMessages((prev) => [...prev, { role: "assistant", content: data.answer }]);
     } catch (error) {
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: 'Error: Make sure your Python backend is running!' },
+        { role: "assistant", content: "Error: Could not connect to the backend. Is FastAPI running?" },
       ]);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
   return (
-    <div className="chat-container">
-      <header className="chat-header">
-        <h1>Video Games Assistant</h1>
-        <p>Ask about game release dates and ratings!</p>
+    <div className="app-container">
+      <header className="app-header">
+        <div className="header-title">
+          <span className="logo">⚡</span> OSTEP 
+          <span style={{ fontSize: "0.85rem", color: "#8b949e", marginLeft: "8px", fontWeight: "400" }}>
+            (Operating Systems: Three Easy Pieces)
+          </span> 
+          RAG System
+        </div>
+        <div className="header-status">
+          <span className="status-dot"></span> Online
+        </div>
       </header>
 
-      <div className="messages-box">
-        {messages.length === 0 && (
-          <div className="empty-state">Try asking: "When did the game Grand Theft Auto V come out?"</div>
-        )}
-        
-        {messages.map((msg, index) => (
-          <div key={index} className={`message-wrapper ${msg.role}`}>
+      <main className="chat-window">
+        {messages.map((msg, idx) => (
+          <div key={idx} className={`message-row ${msg.role}`}>
             <div className={`message-bubble ${msg.role}`}>
-              {msg.content}
+              <div className="message-role">{msg.role === "assistant" ? "OSTEP AI" : "You"}</div>
+              <div className="message-content">
+                {msg.content}
+              </div>
             </div>
           </div>
         ))}
         
-        {loading && (
-          <div className="message-wrapper assistant">
-            <div className="message-bubble assistant loading">
-              Thinking (this may take a minute on CPU)...
+        {isLoading && (
+          <div className="message-row assistant">
+            <div className="message-bubble assistant loading-bubble">
+              <span className="dot"></span>
+              <span className="dot"></span>
+              <span className="dot"></span>
             </div>
           </div>
         )}
         <div ref={messagesEndRef} />
-      </div>
+      </main>
 
-      <form onSubmit={sendMessage} className="input-area">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="e.g., When did the game Minecraft come out?"
-          disabled={loading}
-        />
-        <button type="submit" disabled={loading || !input.trim()}>
-          Send
-        </button>
-      </form>
+      <footer className="input-area">
+        <form onSubmit={handleSubmit} className="input-form">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask a question about the textbook..."
+            disabled={isLoading}
+            className="chat-input"
+          />
+          <button type="submit" disabled={!input.trim() || isLoading} className="send-button">
+            Send
+          </button>
+        </form>
+        <div className="footer-note">Running locally on Qwen2.5-7B • RTX 5060 Optimized</div>
+      </footer>
     </div>
   );
 }
